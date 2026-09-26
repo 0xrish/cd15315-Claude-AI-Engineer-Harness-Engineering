@@ -1,0 +1,2 @@
+{"question_id": "Q1", "question": "What was the refund amount approved for the damaged jacket?", "expected": "$142.50", "model_answer": "The refund amount mentioned in the summary was $142.50.", "passed": true}
+{"question_id": "Q6", "question": "What is the current status of the payment-method update request?", "expected": "in_progress", "model_answer": "The status is not explicitly stated in the active conversation turns.", "passed": false}

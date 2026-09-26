@@ -27,23 +27,97 @@ SEVERITIES = ["low", "medium", "high"]
 # Schemas — passed verbatim to the Anthropic Messages API as the `tools` arg.
 # ----------------------------------------------------------------------------
 
-# TODO: Populate TOOL_SCHEMAS with the first four tool schemas. Each schema
-# is a dict with "name", "description", and "input_schema". Tool descriptions are read by
-# the model on every turn — write them as if you were teaching the model what each tool is
-# for and *when* to call it. Categorical fields ("claim_type", "severity") must use
-# Anthropic's tool-use `enum` shape against CLAIM_TYPES and SEVERITIES.
-#
-#   - lookup_policy(policy_id: str)
-#     Returns the policy record. Used early in the conversation.
-#   - record_claim_fact(field: str, value: str)
-#     Records one normalized fact (incident_date, location, items_lost, ...).
-#   - classify_claim(claim_type: enum CLAIM_TYPES, confidence: number in [0,1], rationale: str)
-#     Commits the model to a claim type with a confidence score.
-#   - assess_severity(severity: enum SEVERITIES, rationale: str)
-#     Commits the model to a severity bucket.
-#
-# Later tools (request_clarification, route_to_adjuster, escalate_to_human) extend this list.
-TOOL_SCHEMAS: list[dict[str, Any]] = []
+TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "lookup_policy",
+        "description": (
+            "Look up a policyholder's coverage record. Use this early in the "
+            "conversation to confirm the policy exists, what is covered, and the "
+            "deductible. Returns coverage, deductible, status, and policy_holder."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "policy_id": {"type": "string", "description": "Policy identifier, e.g. POL-1001"}
+            },
+            "required": ["policy_id"],
+        },
+    },
+    {
+        "name": "record_claim_fact",
+        "description": (
+            "Record one normalized fact extracted from the claimant's statements "
+            "(e.g., incident_date, location, description, items_lost, injury_party). "
+            "Call once per fact. Facts accumulate into the case file used by routing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "description": "Snake_case field name, e.g. incident_date or location",
+                },
+                "value": {"type": "string", "description": "The fact as a short string"},
+            },
+            "required": ["field", "value"],
+        },
+    },
+    {
+        "name": "classify_claim",
+        "description": (
+            "Commit to a claim type with a confidence score and rationale. Call "
+            "this exactly once per claim, after enough facts and clarifications "
+            "have been gathered. If confidence is below 0.6, prefer escalate_to_human."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "claim_type": {"type": "string", "enum": CLAIM_TYPES},
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "0.0 = no idea; 1.0 = certain",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "One sentence explaining why this type fits the facts",
+                },
+            },
+            "required": ["claim_type", "confidence", "rationale"],
+        },
+    },
+    {
+        "name": "assess_severity",
+        "description": (
+            "Commit to a severity bucket with a rationale. Call this exactly once "
+            "per claim, after classification. Severity reflects damage magnitude, "
+            "injury severity, and policy coverage limits."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "severity": {"type": "string", "enum": SEVERITIES},
+                "rationale": {"type": "string"},
+            },
+            "required": ["severity", "rationale"],
+        },
+    },
+    # TODO: Add three more tool schemas to this list.
+    #
+    #   - request_clarification(question: str, ambiguity_between: list of >=2 CLAIM_TYPES)
+    #     Ask the claimant ONE clarifying question. Returns the scripted claimant reply,
+    #     or the literal string "NO_RESPONSE" if nothing matches.
+    #
+    #   - route_to_adjuster(queue: enum CLAIM_TYPES, claim_summary: str)
+    #     TERMINAL TOOL. The agent picks this when classification confidence is >= 0.6
+    #     and severity has been assessed.
+    #
+    #   - escalate_to_human(reason: str, structured_summary: dict)
+    #     TERMINAL TOOL. The agent picks this when the claim cannot be routed safely.
+    #     structured_summary requires: policy_id, root_cause, candidate_claim_types,
+    #     case_facts, recommended_action, confidence.
+]
 
 # ----------------------------------------------------------------------------
 # Errors — Graceful Tool Failure shape
@@ -51,20 +125,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = []
 
 
 def _err(category: str, retryable: bool, message: str) -> str:
-    # TODO: Return a JSON string with these keys (the Graceful Tool Failure shape):
-    #   is_error: True
-    #   error_category: category   ("transient" or "permanent")
-    #   is_retryable: retryable
-    #   message: message
-    # The shape is what tool_result content carries when the model needs to read an error
-    # and adapt rather than crash the loop.
-    return '{"is_error": true, "message": "TODO: _err not implemented"}'
+    return json.dumps(
+        {
+            "is_error": True,
+            "error_category": category,
+            "is_retryable": retryable,
+            "message": message,
+        }
+    )
 
 
 def _ok(payload: dict[str, Any]) -> str:
-    # TODO: Return json.dumps(payload). Tool results are always strings;
-    # the model parses them on the next turn.
-    return "{}"
+    return json.dumps(payload)
 
 
 # ----------------------------------------------------------------------------
@@ -73,31 +145,51 @@ def _ok(payload: dict[str, Any]) -> str:
 
 
 def _t_lookup_policy(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Read inp["policy_id"]; if not a string, return a permanent error.
-    # Look it up in session.policies; if missing, return a permanent error naming the id.
-    # Otherwise return the policy dict via _ok(...).
-    return _err("permanent", False, "TODO: _t_lookup_policy not implemented yet")
+    pid = inp.get("policy_id")
+    if not isinstance(pid, str):
+        return _err("permanent", False, "policy_id must be a string")
+    policy = session.policies.get(pid)
+    if policy is None:
+        return _err("permanent", False, f"policy_id {pid!r} not found")
+    return _ok(policy)
 
 
 def _t_record_claim_fact(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Validate inp["field"] and inp["value"] are both strings; store
-    # session.case_facts[field] = value; return _ok with {"recorded": True, "field": field,
-    # "case_facts_count": len(session.case_facts)}.
-    return _err("permanent", False, "TODO: _t_record_claim_fact not implemented yet")
+    field = inp.get("field")
+    value = inp.get("value")
+    if not isinstance(field, str) or not isinstance(value, str):
+        return _err("permanent", False, "field and value must both be strings")
+    session.case_facts[field] = value
+    return _ok({"recorded": True, "field": field, "case_facts_count": len(session.case_facts)})
 
 
 def _t_classify_claim(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Validate claim_type (in CLAIM_TYPES), confidence (number in [0,1]),
-    # rationale (string). Store session.classification = {claim_type, confidence, rationale}
-    # and return _ok with the recorded values plus {"recorded": True}.
-    return _err("permanent", False, "TODO: _t_classify_claim not implemented yet")
+    claim_type = inp.get("claim_type")
+    confidence = inp.get("confidence")
+    rationale = inp.get("rationale")
+    if claim_type not in CLAIM_TYPES:
+        return _err("permanent", False, f"claim_type must be one of {CLAIM_TYPES}")
+    if not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
+        return _err("permanent", False, "confidence must be a number in [0,1]")
+    if not isinstance(rationale, str):
+        return _err("permanent", False, "rationale must be a string")
+    session.classification = {
+        "claim_type": claim_type,
+        "confidence": float(confidence),
+        "rationale": rationale,
+    }
+    return _ok({"recorded": True, **session.classification})
 
 
 def _t_assess_severity(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Validate severity (in SEVERITIES) and rationale (string).
-    # Store session.severity = {severity, rationale} and return _ok with the recorded
-    # values plus {"recorded": True}.
-    return _err("permanent", False, "TODO: _t_assess_severity not implemented yet")
+    severity = inp.get("severity")
+    rationale = inp.get("rationale")
+    if severity not in SEVERITIES:
+        return _err("permanent", False, f"severity must be one of {SEVERITIES}")
+    if not isinstance(rationale, str):
+        return _err("permanent", False, "rationale must be a string")
+    session.severity = {"severity": severity, "rationale": rationale}
+    return _ok({"recorded": True, **session.severity})
 
 
 def _t_request_clarification(session: ClaimSession, inp: dict[str, Any]) -> str:

@@ -32,18 +32,13 @@ class ShiftResult:
 def gather_new_defects(
     warm: WarmStore, since_ts: str, limit: int = 50
 ) -> list[dict[str, Any]]:
-    # TODO: Return WarmStore.defects_since(since_ts, limit=limit) — nothing more.
-    # This must be a pure pass-through to SQL. No Python-side filtering of
-    # severity, component, or time. The test scans this function's source with
-    # AST and rejects any `if` / `filter` / `[x for x in ... if ...]` you add.
-    raise NotImplementedError
+    return warm.defects_since(since_ts, limit=limit)
 
 
 def build_rich_prompt(
     role: str, hot_state: HotState, new_defects: Sequence[Mapping[str, Any]]
 ) -> str:
-    # TODO: Build a rich invocation and return its rendered prompt string.
-    raise NotImplementedError
+    return rich(role=role, hot_state=hot_state, new_defects=new_defects).prompt
 
 
 def _parse_hot_state_update(response_text: str) -> dict[str, Any] | None:
@@ -95,20 +90,48 @@ def run_shift(
     since_ts: str,
     role: str = "quality engineer",
 ) -> ShiftResult:
-    # TODO: One shift = exactly one Claude call. Walk the pipeline end to end:
-    #
-    #   1. Read the prior HotState from hot_state_path.
-    #   2. Pull new defects via gather_new_defects (SQL side, no Python filter).
-    #   3. Build the rich prompt with build_rich_prompt(role, hot_state, new_defects).
-    #   4. Call client.complete([Message(role="user", content=prompt)]) exactly once.
-    #   5. Parse the response's JSON fence (use _parse_hot_state_update) for an
-    #      updated current_shift_summary, active_alerts, and threshold_statuses.
-    #      Fall back to the prior values when a field is missing.
-    #   6. Build the updated HotState (use _new_hashes for the hash list, then
-    #      _trim_to_budget to honor the 5_120-byte ceiling).
-    #   7. Write the updated HotState atomically to hot_state_path.
-    #   8. Append one ScratchpadEntry to scratchpad_path summarising this shift
-    #      (hypothesis_id=f"shift-{shift_id}", evidence + conclusion derived
-    #      from the response, ts=datetime.now(UTC)).
-    #   9. Return ShiftResult(shift_id, new_defect_count, summary).
-    raise NotImplementedError
+    log.info("run_shift start: shift=%s since=%s", shift_id, since_ts)
+    hot_state = HotState.from_path(hot_state_path)
+    new_defects = gather_new_defects(warm, since_ts, limit=50)
+    prompt = build_rich_prompt(role=role, hot_state=hot_state, new_defects=new_defects)
+    response = client.complete([Message(role="user", content=prompt)])
+
+    parsed = _parse_hot_state_update(response.content)
+    parsed_summary = parsed.get("current_shift_summary") if parsed else None
+    summary: str = (
+        parsed_summary
+        if isinstance(parsed_summary, str)
+        else _short_summary_from_response(response.content, shift_id)
+    )
+    parsed_alerts = parsed.get("active_alerts") if parsed else None
+    active_alerts: list[str] = (
+        [str(a) for a in parsed_alerts]
+        if isinstance(parsed_alerts, list)
+        else list(hot_state.active_alerts)
+    )
+    parsed_statuses = parsed.get("threshold_statuses") if parsed else None
+    threshold_statuses: dict[str, str] = (
+        {str(k): str(v) for k, v in parsed_statuses.items()}
+        if isinstance(parsed_statuses, dict)
+        else dict(hot_state.threshold_statuses)
+    )
+
+    updated = HotState(
+        recent_defect_hashes=_new_hashes(new_defects, hot_state.recent_defect_hashes),
+        current_shift_summary=summary,
+        active_alerts=active_alerts,
+        threshold_statuses=threshold_statuses,
+    )
+    updated = _trim_to_budget(updated)
+    updated.write_atomic(hot_state_path)
+
+    Scratchpad(scratchpad_path).append(
+        ScratchpadEntry(
+            hypothesis_id=f"shift-{shift_id}",
+            evidence=f"{len(new_defects)} new defects analyzed since {since_ts}",
+            conclusion=summary,
+            ts=datetime.now(UTC),
+        )
+    )
+    log.info("run_shift done: shift=%s new=%d", shift_id, len(new_defects))
+    return ShiftResult(shift_id=shift_id, new_defect_count=len(new_defects), summary=summary)

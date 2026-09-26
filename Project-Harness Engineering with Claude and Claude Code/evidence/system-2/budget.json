@@ -1,0 +1,13 @@
+{
+  "token_counter_methodology": "Anthropic messages.count_tokens endpoint (with len(text)/3.8 fallback)",
+  "baseline_tokens": 47144,
+  "assembled_tokens": 20350,
+  "reduction_pct": 56.83,
+  "per_section_tokens": {
+    "case_facts": 149,
+    "resolved_refund": 296,
+    "resolved_subscription": 365,
+    "active": 19538
+  },
+  "compression_api": "claude-haiku-4-5-20251001"
+}

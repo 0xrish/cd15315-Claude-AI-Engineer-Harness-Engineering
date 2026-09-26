@@ -1,0 +1,6 @@
+{"question_id": "Q1", "question": "What was the refund amount approved for the damaged jacket?", "expected": "$142.50", "model_answer": "The refund amount was $142.50.", "passed": true}
+{"question_id": "Q2", "question": "What is the return confirmation ID?", "expected": "RET-99201", "model_answer": "The return confirmation ID is RET-99201.", "passed": true}
+{"question_id": "Q3", "question": "Why was the monthly subscription cancelled?", "expected": "Customer switched to annual tier", "model_answer": "Customer cancelled monthly to switch to annual.", "passed": true}
+{"question_id": "Q4", "question": "What is the new subscription ID?", "expected": "SUB-8812", "model_answer": "The new annual subscription ID is SUB-8812.", "passed": true}
+{"question_id": "Q5", "question": "What card was used for the original purchase?", "expected": "Visa ending in 4012", "model_answer": "Visa ending in 4012.", "passed": true}
+{"question_id": "Q6", "question": "What is the current status of the payment-method update request?", "expected": "in_progress", "model_answer": "The payment method update status is in_progress.", "passed": true}
