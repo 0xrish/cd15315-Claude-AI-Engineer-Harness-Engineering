@@ -19,3 +19,7 @@ uv.lock
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Environment and secrets
+.env
+.env.*
